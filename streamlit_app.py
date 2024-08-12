@@ -9,6 +9,7 @@ from langchain.schema import SystemMessage, HumanMessage
 from docx import Document
 from pinecone import Pinecone, ServerlessSpec
 import io
+from langchain.callbacks import get_openai_callback
 
 # Load environment variables
 load_dotenv()
@@ -16,11 +17,17 @@ load_dotenv()
 # Access API keys
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
+LANGSMITH_API_KEY = st.secrets["LANGSMITH_API_KEY"]
 
 # Initialize clients
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 INDEX_NAME = "active-cyber"
+
+# Initialize LangSmith
+os.environ["LANGCHAIN_API_KEY"] = LANGSMITH_API_KEY
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"] = "active-cyber bot"
 
 # Initialize Pinecone index
 if INDEX_NAME not in pc.list_indexes().names():
@@ -36,7 +43,10 @@ def extract_text_from_docx(file):
     return text
 
 def generate_embedding(text):
-    return embeddings.embed_query(text)
+    with get_openai_callback() as cb:
+        embedding = embeddings.embed_query(text)
+        st.session_state['embedding_tokens'] = st.session_state.get('embedding_tokens', 0) + cb.total_tokens
+    return embedding
 
 def split_document(document_text):
     paragraphs = document_text.split('\n')
@@ -95,32 +105,36 @@ def get_answer(context, user_query):
     5.Remember, brevity and relevance are key. Stick strictly to addressing the user's specific query.""")
     human_message = HumanMessage(content=f"Context: {context}\n\nQuestion: {user_query}\n\nPlease provide a comprehensive answer based on the given context.")
     
-    response = chat([system_message, human_message])
+    with get_openai_callback() as cb:
+        response = chat([system_message, human_message])
+        st.session_state['answer_tokens'] = st.session_state.get('answer_tokens', 0) + cb.total_tokens
     return response.content
 
 def main():
-    st.set_page_config(page_title="Document Assistant", layout="wide")
-
-    st.title("Document Assistant")
+    st.set_page_config(page_title="ActiveCyber Document Assistant", layout="wide")
 
     # Sidebar for file upload
     with st.sidebar:
+        st.image("Active Cyber Logo.png", width=200)
         st.header("Upload Documents")
         uploaded_files = st.file_uploader("Upload DOCX Files", type="docx", accept_multiple_files=True)
         
-        if uploaded_files and st.button("Upsert Documents"):
-            with st.spinner("Uploading documents into pinecone index"):
-                for uploaded_file in uploaded_files:
-                    document_text = extract_text_from_docx(uploaded_file)
-                    metadata = {"title": uploaded_file.name}
-                    document_ids = upsert_document(document_text, metadata)
-                    if document_ids:
-                        st.success(f"Uploaded: {uploaded_file.name} (IDs: {', '.join(document_ids)})")
-                    else:
-                        st.error(f"Failed to upload: {uploaded_file.name}")
+        if uploaded_files:
+            if st.button("Process Documents"):
+                with st.spinner("Uploading documents into Pinecone index"):
+                    for uploaded_file in uploaded_files:
+                        document_text = extract_text_from_docx(uploaded_file)
+                        metadata = {"title": uploaded_file.name}
+                        document_ids = upsert_document(document_text, metadata)
+                        if document_ids:
+                            st.success(f"Uploaded: {uploaded_file.name}")
+                        else:
+                            st.error(f"Failed to upload: {uploaded_file.name}")
+
 
     # Main area for query interface
-    st.header("Query Documents")
+    st.title("ActiveCyber Document Assistant")
+
     user_query = st.text_input("Enter your question:")
     if st.button("Get Answer"):
         if user_query:
@@ -129,11 +143,34 @@ def main():
                 if matches:
                     context = " ".join([text for _, text in matches])
                     answer = get_answer(context, user_query)
-                    st.write(answer)
+                    st.write("Answer:", answer)
                 else:
                     st.warning("No relevant documents found. Please try a different question or upload more documents.")
         else:
             st.warning("Please enter a question before searching.")
+
+    # Add copyright notice at the bottom
+    st.markdown(
+        """
+        <style>
+        .footer {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            background-color: white;
+            color: black;
+            text-align: center;
+            padding: 10px 0;
+            border-top: 1px solid #e5e5e5;
+        }
+        </style>
+        <div class="footer">
+            © 2024 KLM Solutions. All rights reserved.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main()
